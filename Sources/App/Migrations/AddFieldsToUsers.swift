@@ -2,8 +2,7 @@
 //  File.swift
 //  
 //
-//  Created by Ayaan Monappa on 29/7/24.
-//
+
 import Fluent
 
 struct AddFieldsToUsers: Migration {

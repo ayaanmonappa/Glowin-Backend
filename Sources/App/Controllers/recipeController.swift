@@ -7,142 +7,84 @@ struct RecipeList: Content {
     let nextLink: String?  // Send the next link back to the frontend
 }
 
-// Global variables to store all fetched batches of recipes and the fetching state
-var cachedRecipes: [RecipeResponse.Hit.Recipe] = []
-var isFetchingComplete: Bool = false  // Indicates if all batches have been fetched
-var currentBatchCount: Int = 0  // Track the number of batches fetched
-
 struct RecipeController: RouteCollection {
     func boot(routes: RoutesBuilder) throws {
         let recipeRoutes = routes.grouped("recipes")
         let protected = recipeRoutes.grouped(UserToken.authenticator(), User.guardMiddleware())
-        protected.get(use: startFetchingRecipes)  // First call to fetch all recipes
-        protected.get("status", use: fetchStatus)  // Frontend polls for fetching status
+        protected.get(use: fetchRecipes)
     }
 
-    // Start fetching recipes asynchronously
-    func startFetchingRecipes(req: Request) throws -> HTTPStatus {
+    func fetchRecipes(req: Request) throws -> EventLoopFuture<RecipeList> {
         guard let user = try? req.auth.get(User.self) else {
             throw Abort(.unauthorized)
         }
 
         let userID = try user.requireID()
-        print("Starting recipe fetch for userID: \(userID)")
+        print("Fetching recipes for userID: \(userID)")
 
-        // Reset cache and fetching state
-        cachedRecipes.removeAll()
-        isFetchingComplete = false
-        currentBatchCount = 0
-
-        // Kick off background process
-        Measurement.query(on: req.db)
+        return Measurement.query(on: req.db)
             .filter(\Measurement.$user.$id == userID)
             .sort(\.$date, .descending)
             .first()
             .unwrap(or: Abort(.notFound, reason: "No measurements found for userID: \(userID)"))
             .flatMap { measurement in
-                let goalType = self.determineGoalType(from: user.goal?.lowercased() ?? "")
-                let (mealCaloricRange, mealMacroDistribution) = self.calculateNutritionalRequirements(for: user, measurement: measurement, goalType: goalType)
+                let goalType = RecipeController.determineGoalType(from: user.goal?.lowercased() ?? "")
+                let (mealCaloricRange, mealMacroDistribution) = RecipeController.calculateNutritionalRequirements(for: user, measurement: measurement, goalType: goalType)
 
-                print("Goal: \(goalType), Caloric Range: \(mealCaloricRange)")
-
-                // Fetch the first batch and begin the background fetching process
-                return self.fetchPaginatedRecipes(caloricRange: mealCaloricRange, macroDistribution: mealMacroDistribution, req: req, from: 0, to: 20)
-                    .flatMap { response in
-                        cachedRecipes = response.meals  // Cache the first batch
-                        if let nextLink = response.nextLink {
-                            return self.fetchRemainingBatches(application: req.application, nextLink: nextLink)
-                        } else {
-                            isFetchingComplete = true
-                            return req.eventLoop.makeSucceededFuture(())
-
-                        }
-                    }
+                return self.fetchAllRecipes(
+                    caloricRange: mealCaloricRange,
+                    macroDistribution: mealMacroDistribution,
+                    req: req
+                )
             }
-            .whenComplete { result in
-                switch result {
-                case .success:
-                    print("Recipe fetching complete.")
-                    isFetchingComplete = true
-                case .failure(let error):
-                    print("Failed to fetch recipes: \(error)")
-                    isFetchingComplete = true  // Mark complete to stop polling even on failure
-                }
-            }
-
-        // Immediately return a response indicating the process has started
-        return .accepted
     }
 
-    // Polling endpoint for the frontend to check status and retrieve results
-    func fetchStatus(req: Request) throws -> EventLoopFuture<RecipeList> {
-        if isFetchingComplete {
-            return req.eventLoop.makeSucceededFuture(RecipeList(meals: cachedRecipes, nextLink: nil))  // Return final results
-        } else {
-            return req.eventLoop.makeSucceededFuture(RecipeList(meals: [], nextLink: "Fetching in progress..."))
-        }
-    }
-
-    // Fetch remaining batches with a 15-second delay between requests, stop after 5 batches
-    private func fetchRemainingBatches(application: Application, nextLink: String) -> EventLoopFuture<Void> {
-        guard let url = URL(string: nextLink), currentBatchCount < 3 else {
-            print("Reached the batch limit or invalid nextLink.")
-            isFetchingComplete = true
-            return application.eventLoopGroup.next().makeSucceededVoidFuture()
-        }
-
-        currentBatchCount += 1  // Increment the batch count
-        let promise = application.eventLoopGroup.next().makePromise(of: Void.self)
-        print("Fetching next batch with nextLink: \(nextLink), batch \(currentBatchCount)")
-
-        // Schedule the next batch fetch with a delay
-        application.eventLoopGroup.next().scheduleTask(in: .seconds(15)) {
-            URLSession.shared.dataTask(with: url) { data, response, error in
-                if let error = error {
-                    print("Error fetching next batch: \(error)")
-                    promise.fail(error)
-                    return
-                }
-
-                guard let data = data else {
-                    print("No data received from next batch")
-                    promise.fail(Abort(.badRequest, reason: "No data received"))
-                    return
-                }
-
-                do {
-                    let decodedResponse = try JSONDecoder().decode(RecipeResponse.self, from: data)
-                    let recipes = decodedResponse.hits.map { $0.recipe }
-                    cachedRecipes.append(contentsOf: recipes)  // Append to cache
-                    let nextLink = decodedResponse._links?.next?.href
-
-                    if let nextLink = nextLink {
-                        // Continue fetching the next batch
-                        self.fetchRemainingBatches(application: application, nextLink: nextLink)
-                            .cascade(to: promise)
-                    } else {
-                        // All batches are fetched
-                        print("All batches fetched.")
-                        promise.succeed(())
-                    }
-                } catch {
-                    print("Failed to decode next batch: \(error)")
-                    promise.fail(error)
-                }
-            }.resume()
-        }
-
-        return promise.futureResult
-    }
-
-    // Helper method to fetch paginated recipes
-    private func fetchPaginatedRecipes(
+ private func fetchAllRecipes(
         caloricRange: String,
         macroDistribution: (proteinRange: String, fatRange: String, carbRange: String),
-        req: Request,
-        from: Int,
-        to: Int
+        req: Request
     ) -> EventLoopFuture<RecipeList> {
+        let eventLoop = req.eventLoop
+        var allRecipes: [RecipeResponse.Hit.Recipe] = []
+        let maxRecipes = 100  // Set the maximum number of recipes
+
+        // Recursive function to fetch all pages
+        func fetchNextBatch(nextLink: String?) -> EventLoopFuture<Void> {
+            guard let nextLink = nextLink, let url = URL(string: nextLink) else {
+                return eventLoop.makeSucceededVoidFuture()
+            }
+            if allRecipes.count >= maxRecipes {
+                print("Reached maximum limit of \(maxRecipes) recipes.")
+                return eventLoop.makeSucceededVoidFuture()
+            }
+
+            return self.fetchData(from: url, on: eventLoop)
+                .flatMapThrowing { data -> (recipes: [RecipeResponse.Hit.Recipe], nextLink: String?) in
+                    do {
+                        let decodedResponse = try JSONDecoder().decode(RecipeResponse.self, from: data)
+                        let recipes = decodedResponse.hits.map { $0.recipe }
+                        let nextLink = decodedResponse._links?.next?.href
+                        return (recipes, nextLink)
+                    } catch {
+                        // Log the raw data for debugging
+                        if let rawResponse = String(data: data, encoding: .utf8) {
+                            print("Raw Response: \(rawResponse)")
+                        }
+                        throw error
+                    }
+                }
+                .flatMap { result in
+                    allRecipes.append(contentsOf: result.recipes)
+                    // Ensure we don't exceed the maximum number of recipes
+                    if allRecipes.count >= maxRecipes {
+                        allRecipes = Array(allRecipes.prefix(maxRecipes))
+                        return eventLoop.makeSucceededVoidFuture()
+                    }
+                    return fetchNextBatch(nextLink: result.nextLink)
+                }
+        }
+
+        // Build the initial URL
         var urlComponents = URLComponents(string: "https://api.edamam.com/api/recipes/v2")!
         urlComponents.queryItems = [
             URLQueryItem(name: "type", value: "public"),
@@ -152,48 +94,69 @@ struct RecipeController: RouteCollection {
             URLQueryItem(name: "nutrients[PROCNT]", value: macroDistribution.proteinRange),
             URLQueryItem(name: "nutrients[FAT]", value: macroDistribution.fatRange),
             URLQueryItem(name: "nutrients[CHOCDF]", value: macroDistribution.carbRange),
-            URLQueryItem(name: "from", value: "\(from)"),
-            URLQueryItem(name: "to", value: "\(to)")
+            URLQueryItem(name: "from", value: "0"),
+            URLQueryItem(name: "to", value: "20")
         ]
 
-        let url = urlComponents.url!
-        print("Requesting URL: \(url)")
-
-        return fetchData(from: url, on: req.eventLoop).flatMapThrowing { data in
-            do {
-                let decodedResponse = try JSONDecoder().decode(RecipeResponse.self, from: data)
-                let nextLink = decodedResponse._links?.next?.href
-                let recipes = decodedResponse.hits.map { $0.recipe }
-                print("Successfully fetched \(recipes.count) recipes.")
-                return RecipeList(meals: recipes, nextLink: nextLink)
-            } catch {
-                print("Failed to decode response: \(error)")
-                throw error
-            }
+        if let url = urlComponents.url {
+            print("Initial Request URL: \(url)")
         }
+
+        return fetchData(from: urlComponents.url!, on: eventLoop)
+            .flatMapThrowing { data -> (recipes: [RecipeResponse.Hit.Recipe], nextLink: String?) in
+                do {
+                    let decodedResponse = try JSONDecoder().decode(RecipeResponse.self, from: data)
+                    let recipes = decodedResponse.hits.map { $0.recipe }
+                    let nextLink = decodedResponse._links?.next?.href
+                    return (recipes, nextLink)
+                } catch {
+                    // Log the raw response on error
+                    if let rawResponse = String(data: data, encoding: .utf8) {
+                        print("Raw Response: \(rawResponse)")
+                    }
+                    throw error
+                }
+            }
+            .flatMap { result in
+                allRecipes.append(contentsOf: result.recipes)
+                return fetchNextBatch(nextLink: result.nextLink)
+            }
+            .map {
+                if allRecipes.count > maxRecipes {
+                    allRecipes = Array(allRecipes.prefix(maxRecipes))
+                }
+                return RecipeList(meals: allRecipes, nextLink: nil)
+            }
     }
 
-    // Fetch data using URLSession
-    private func fetchData(from url: URL, on eventLoop: EventLoop) -> EventLoopFuture<Data> {
+
+ private func fetchData(from url: URL, on eventLoop: EventLoop) -> EventLoopFuture<Data> {
+        print("Fetching data from URL: \(url)")
         let promise = eventLoop.makePromise(of: Data.self)
         URLSession.shared.dataTask(with: url) { data, response, error in
             if let error = error {
-                print("Error fetching data: \(error)")
+                print("Error fetching data: \(error.localizedDescription)")
                 promise.fail(error)
                 return
             }
-            guard let data = data else {
-                print("No data received.")
-                promise.fail(Abort(.badRequest, reason: "No data received"))
-                return
+            if let response = response as? HTTPURLResponse {
+                print("Response Status Code: \(response.statusCode)")
             }
-            promise.succeed(data)
+            if let data = data {
+                if let rawResponse = String(data: data, encoding: .utf8) {
+                    print("Raw Response Data: \(rawResponse)")
+                }
+                promise.succeed(data)
+            } else {
+                promise.fail(Abort(.badRequest, reason: "No data received"))
+            }
         }.resume()
         return promise.futureResult
     }
 
+
     // Helper methods for goal and nutritional requirement calculation
-    private func determineGoalType(from goal: String) -> String {
+    static func determineGoalType(from goal: String) -> String {
         if goal.contains("lose") || goal.contains("fat") || goal.contains("weight") {
             return "lose fat"
         } else if goal.contains("gain") || goal.contains("muscle") {
@@ -204,9 +167,8 @@ struct RecipeController: RouteCollection {
             return "maintenance"  // Default to maintenance if no specific goal is provided
         }
     }
-    
-    // Calculate nutritional requirements based on user profile and goal.
-    private func calculateNutritionalRequirements(
+
+    static func calculateNutritionalRequirements(
         for user: User,
         measurement: Measurement,
         goalType: String
@@ -226,25 +188,17 @@ struct RecipeController: RouteCollection {
                 carbRange: "25-50"
             )
         case "gain muscle":
-            // Adjusted caloric range with a slightly higher base and wider tolerance
             mealCaloricRange = "\(Int((tdee + 250) * 0.25) - 200)-\(Int((tdee + 250) * 0.35) + 200)"
-
             mealMacroDistribution = (
-                // Widening protein range slightly while maintaining adequate levels
                 proteinRange: "\(Int((measurement.weight * 1.5)/4) - 10)-\(Int((measurement.weight * 2.5)/4) + 10)",
-
-                // Expanding fat range to capture recipes with moderate fats
                 fatRange: "\(Int((measurement.weight * 0.4)/4) - 10)-\(Int((measurement.weight * 1.4)/4) + 10)",
-
-                // Allowing more flexibility in carbs based on weight threshold
                 carbRange: measurement.weight > 200 ? "45-110" : "30-75"
             )
-
         case "maintenance":
-            mealCaloricRange = "\(Int(tdee * 0.25) - 100)-\(Int(tdee * 0.30) + 100)+100"
+            mealCaloricRange = "\(Int(tdee * 0.25) - 100)-\(Int(tdee * 0.30) + 100)"
             mealMacroDistribution = (
-                proteinRange: "\(Int((measurement.weight * 1.2)/4) - 5)-\(Int((measurement.weight * 1.6)/4) + 5)",
-                fatRange: "\(Int((measurement.weight * 0.8)/4) - 5)-\(Int((measurement.weight * 1.2)/4) + 5)",
+                proteinRange: "\(Int((measurement.weight * 1.2) / 4) - 5)-\(Int((measurement.weight * 1.6) / 4) + 5)",
+                fatRange: "\(Int((measurement.weight * 0.8) / 4) - 5)-\(Int((measurement.weight * 1.2) / 4) + 5)",
                 carbRange: "40-70"
             )
         default:
@@ -255,16 +209,10 @@ struct RecipeController: RouteCollection {
                 carbRange: "45-65"
             )
         }
-        print("Goal Type: \(goalType)")
-        print("Caloric Range: \(mealCaloricRange)")
-        print("Protein Range: \(mealMacroDistribution.proteinRange)")
-        print("Fat Range: \(mealMacroDistribution.fatRange)")
-        print("Carb Range: \(mealMacroDistribution.carbRange)")
         return (mealCaloricRange, mealMacroDistribution)
     }
 
-    // BMR calculation based on gender, weight, height, and age.
-    private func calculateBMR(gender: String, weight: Double, height: Double, age: Int) -> Double {
+    static func calculateBMR(gender: String, weight: Double, height: Double, age: Int) -> Double {
         if gender.lowercased() == "male" {
             return 88.362 + (13.397 * weight) + (4.799 * height) - (5.677 * Double(age))
         } else {
@@ -272,8 +220,7 @@ struct RecipeController: RouteCollection {
         }
     }
 
-    // TDEE calculation based on activity level.
-    private func calculateTDEE(bmr: Double, activityLevel: String) -> Double {
+    static func calculateTDEE(bmr: Double, activityLevel: String) -> Double {
         let activityMultiplier: Double
         switch activityLevel.lowercased() {
         case "sedentary": activityMultiplier = 1.2
