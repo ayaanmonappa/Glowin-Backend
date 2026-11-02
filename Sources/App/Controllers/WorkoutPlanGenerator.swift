@@ -114,7 +114,7 @@ struct WorkoutPlanGenerator {
          let url = URI(string: "https://exercisedb.p.rapidapi.com/exercises/exercise/\(id)")
 
          var headers = HTTPHeaders()
-         headers.add(name: "x-rapidapi-key", value: "dc95d8c1ccmsha9321c40b2a5c53p1ea1a7jsna8fbcf8b921e")
+         headers.add(name: "x-rapidapi-key", value: Environment.get("RAPIDAPI_KEY") ?? "")
          headers.add(name: "x-rapidapi-host", value: "exercisedb.p.rapidapi.com")
 
          let clientRequest = ClientRequest(

@@ -1,9 +1,3 @@
-//
-//  File 2.swift
-//  
-//
-//  Created by Ayaan Monappa on 15/7/24.
-//
 
 import Fluent
 

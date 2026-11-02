@@ -23,29 +23,16 @@ public func configure(_ app: Application) throws {
         ContentConfiguration.global.use(encoder: encoder, for: .json)
         ContentConfiguration.global.use(decoder: decoder, for: .json)
     
- 
-   
-    // SendGrid setup
-       if let sendgridAPIKey = Environment.get("SENDGRID_API_KEY") {
-           app.logger.info("SendGrid API Key is successfully loaded.")
-           app.sendgridClient = SendGridClient(httpClient: app.http.client.shared, apiKey: sendgridAPIKey)
-       } else {
-           app.logger.error("SendGrid API key not found in environment variables.")
-           throw Abort(.internalServerError, reason: "SendGrid API key is missing.")
-       }
 
     // Migrations
     app.logger.info("Adding migrations...")
     app.migrations.add(CreateUser2())
-    app.migrations.add(CreatePasswordResetToken())
     app.migrations.add(CreateMeasurement())
     app.migrations.add(CreateUserToken())
    // app.migrations.add(CreateFavoriteRecipe())
     app.migrations.add(CreateGeneratedGoal1())
     app.migrations.add(AddFieldsToUsers())
     app.migrations.add(AddActivityLevelToUsers())
-    app.migrations.add(AddIsVerifiedToUsers2())
-    app.migrations.add(CreateVerificationToken2())
 
 
     app.logger.info("Starting migrations...")

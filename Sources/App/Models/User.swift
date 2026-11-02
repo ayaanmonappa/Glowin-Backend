@@ -25,8 +25,6 @@ final class User: Model, Content, Authenticatable {
     @Field(key: "goal")
     var goal: String?
     
-    @Field(key: "is_verified")
-    var isVerified: Bool
     
     @OptionalField(key: "bodyType")
     var bodyType: String?
@@ -45,7 +43,7 @@ final class User: Model, Content, Authenticatable {
     init() {
     }
 
-    init(id: UUID? = nil, username: String, email: String, password: String, gender: String, age: Int, goal: String? = nil, bodyType: String? = nil, activity_level: String? = nil, lastGoalGeneration: Date? = nil, isVerified: Bool = false) {
+    init(id: UUID? = nil, username: String, email: String, password: String, gender: String, age: Int, goal: String? = nil, bodyType: String? = nil, activity_level: String? = nil, lastGoalGeneration: Date? = nil) {
         self.id = id
         self.username = username
         self.email = email
@@ -56,7 +54,7 @@ final class User: Model, Content, Authenticatable {
         self.bodyType = bodyType
         self.activityLevel = activityLevel
         self.lastGoalGeneration = lastGoalGeneration
-        self.isVerified = isVerified
+
 
     
     }

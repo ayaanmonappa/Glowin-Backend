@@ -3,8 +3,8 @@ import Vapor
 
 class RecipeService {
     private let baseURL = "https://api.edamam.com/api/recipes/v2"
-    private let appID = "03dc14dc"
-    private let appKey = "27e3611519adb7798beee482c698a12d"
+    private let appID = Environment.get("EDAMAM_APP_ID") ?? ""
+    private let appKey = Environment.get("EDAMAM_APP_KEY") ?? ""
 
     func fetchRecipes(
         req: Request,
@@ -67,15 +67,19 @@ class RecipeService {
             print("Raw data received from backend: \(String(data: data, encoding: .utf8) ?? "nil")")  // Add debugging for raw data
 
             do {
+                print("Raw data received from API: \(String(data: data, encoding: .utf8) ?? "nil")")  // Log raw data
+
                 let decodedResponse = try JSONDecoder().decode(RecipeResponse.self, from: data)
                 let recipes = decodedResponse.hits.map { $0.recipe }
                 let nextLink = decodedResponse._links?.next?.href
 
-                print("Successfully decoded response with \(recipes.count) recipes, next link: \(String(describing: nextLink))")
+                print("Successfully decoded \(recipes.count) recipes")
                 promise.succeed((recipes: recipes, nextLink: nextLink))
-
+            } catch let DecodingError.keyNotFound(key, context) {
+                print("Decoding error: Key '\(key.stringValue)' not found - \(context.debugDescription)")
+                promise.fail(Abort(.internalServerError, reason: "Failed to decode API response"))
             } catch {
-                print("Error decoding response: \(error)")
+                print("Unexpected error during decoding: \(error)")
                 promise.fail(error)
             }
         }
