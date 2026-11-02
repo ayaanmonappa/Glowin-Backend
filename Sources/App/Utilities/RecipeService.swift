@@ -3,8 +3,8 @@ import Vapor
 
 class RecipeService {
     private let baseURL = "https://api.edamam.com/api/recipes/v2"
-    private let appID = "03dc14dc"
-    private let appKey = "27e3611519adb7798beee482c698a12d"
+    private let appID = Environment.get("EDAMAM_APP_ID") ?? ""
+    private let appKey = Environment.get("EDAMAM_APP_KEY") ?? ""
 
     func fetchRecipes(
         req: Request,

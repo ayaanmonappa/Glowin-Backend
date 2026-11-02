@@ -88,8 +88,8 @@ struct RecipeController: RouteCollection {
         var urlComponents = URLComponents(string: "https://api.edamam.com/api/recipes/v2")!
         urlComponents.queryItems = [
             URLQueryItem(name: "type", value: "public"),
-            URLQueryItem(name: "app_id", value: "03dc14dc"),
-            URLQueryItem(name: "app_key", value: "27e3611519adb7798beee482c698a12d"),
+            URLQueryItem(name: "app_id", value: Environment.get("EDAMAM_APP_ID") ?? ""),
+            URLQueryItem(name: "app_key", value: Environment.get("EDAMAM_APP_KEY") ?? ""),
             URLQueryItem(name: "calories", value: caloricRange),
             URLQueryItem(name: "nutrients[PROCNT]", value: macroDistribution.proteinRange),
             URLQueryItem(name: "nutrients[FAT]", value: macroDistribution.fatRange),

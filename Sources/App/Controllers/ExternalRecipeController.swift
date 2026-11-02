@@ -20,7 +20,7 @@ struct ExternalRecipeController: RouteCollection {
         let fat = try req.query.get(String.self, at: "fat")
         let carbs = try req.query.get(String.self, at: "carbs")
 
-        let url = URI(string: "https://api.edamam.com/api/recipes/v2?type=public&q=\(query)&app_id=03dc14dc&app_key=27e3611519adb7798beee482c698a12d&calories=\(calories)&nutrients[PROCNT]=\(protein)&nutrients[FAT]=\(fat)&nutrients[CHOCDF]=\(carbs)")
+        let url = URI(string: "https://api.edamam.com/api/recipes/v2?type=public&q=\(query)&app_id=\(Environment.get("EDAMAM_APP_ID") ?? "")&app_key=\(Environment.get("EDAMAM_APP_KEY") ?? "")&calories=\(calories)&nutrients[PROCNT]=\(protein)&nutrients[FAT]=\(fat)&nutrients[CHOCDF]=\(carbs)")
 
         return req.client.get(url)
     }
